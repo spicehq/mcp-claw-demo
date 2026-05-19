@@ -123,7 +123,9 @@ embeddings:
       openai_api_key: ${secrets:OPENAI_API_KEY}
 
 # ============================================================================
-# Models — model routing for clients that point at `/v1/chat/completions`.
+# Models — model routing for clients that point at `/v1/chat/completions`
+# or `/v1/responses` (OpenAI Responses API). Spice supports both; clients
+# pick whichever shape they prefer.
 #
 # Three routes, picked by the client via the `model` field:
 #   * chat-router  — hosted OpenAI, general orchestrator.
@@ -142,6 +144,7 @@ models:
       openai_api_key: ${secrets:OPENAI_API_KEY}
       tools: search_registry
       tool_embedding_model: text_embed
+      responses_api: enabled
       system_prompt: |
         You are AcmeClaw, Acme's internal copilot. Help employees answer
         questions about CRM accounts, support tickets, sales analytics, and
@@ -184,6 +187,7 @@ models:
       openai_api_key: ${secrets:PRIVATE_LLM_API_KEY}
       tools: search_registry
       tool_embedding_model: text_embed
+      responses_api: enabled
       system_prompt: |
         You are AcmeClaw running on Acme's private LLM endpoint. Data
         accessed through these tools must not leave Acme infrastructure.

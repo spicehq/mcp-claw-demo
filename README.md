@@ -59,17 +59,18 @@ What this gives you:
 
 ## Pattern B — Full Spice (model routing + internal tool loop)
 
-Point your OpenAI-compatible client at Spice's `/v1/chat/completions` and
-pick a model by name. Spice runs the tool loop internally against the same
-catalog Pattern A exposes.
+Point your OpenAI-compatible client at Spice's `/v1/chat/completions` —
+or `/v1/responses` if you prefer the Responses API shape — and pick a
+model by name. Spice supports both endpoints and runs the tool loop
+internally against the same catalog Pattern A exposes.
 
 ```
               ┌──────────────────────────────────────────────────────────┐
               │                          SPICE                           │
               │                                                          │
-              │   /v1/chat/completions   /v1/nsql                        │
-              │           │                  │                           │
-  ┌────────┐  │           ▼                  ▼                           │
+              │   /v1/chat/completions  /v1/responses  /v1/nsql          │
+              │                       │                                  │
+  ┌────────┐  │                       ▼                                  │
   │OpenClaw│──┤    model router ──► chat-router   (OpenAI gpt-5.4)       │
   │ (any   │  │                  ├► chat-private  (private endpoint)     │
   │ OpenAI │  │                  └► nsql-coder    (gpt-5.4-mini + prompt)│
@@ -279,6 +280,12 @@ curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
   -d '{"model":"chat-router","messages":[{"role":"user","content":"How many accounts are on the Enterprise plan? Use the sql tool."}]}' \
   | jq -r '.choices[0].message.content'
 # → "There are 6 accounts on the Enterprise plan."
+
+# Same model, Responses API shape (`input` instead of `messages`).
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/responses \
+  -d '{"model":"chat-router","input":"How many accounts are on the Enterprise plan? Use the sql tool."}' \
+  | jq -r '.output[-1].content[0].text'
 
 # Natural language to SQL.
 curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
