@@ -1,0 +1,13 @@
+deploy_id,service,env,status,deployed_by,started_at,duration_s
+dep_2031,checkout-api,prod,success,alice@acme.example,2026-05-18T14:02:00Z,142
+dep_2030,checkout-api,staging,success,alice@acme.example,2026-05-18T13:51:00Z,128
+dep_2029,billing-worker,prod,failed,bob@acme.example,2026-05-18T11:30:00Z,304
+dep_2028,billing-worker,prod,rolled_back,bob@acme.example,2026-05-18T11:35:00Z,46
+dep_2027,billing-worker,prod,success,bob@acme.example,2026-05-18T12:10:00Z,151
+dep_2026,search-indexer,prod,success,carol@acme.example,2026-05-18T09:18:00Z,612
+dep_2025,marketing-site,prod,success,dave@acme.example,2026-05-17T22:04:00Z,38
+dep_2024,marketing-site,prod,success,dave@acme.example,2026-05-17T19:50:00Z,41
+dep_2023,checkout-api,prod,success,alice@acme.example,2026-05-17T15:11:00Z,139
+dep_2022,auth-gateway,prod,success,erin@acme.example,2026-05-17T13:00:00Z,201
+dep_2021,auth-gateway,staging,success,erin@acme.example,2026-05-17T12:48:00Z,198
+dep_2020,reporting-etl,prod,success,frank@acme.example,2026-05-17T05:00:00Z,1820

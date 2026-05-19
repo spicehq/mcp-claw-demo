@@ -1,0 +1,255 @@
+version: v1
+kind: Spicepod
+name: acmeclaw-mcp-demo
+description: |
+  Demo Spicepod for evaluating Spice as an MCP gateway + model router for a
+  personal-agent platform (OpenClaw / NemoClaw). Exposes federated and
+  accelerated enterprise data through `/v1/mcp`, supervises a local memory
+  MCP server, proxies a remote platform MCP, and configures three routed
+  models (hosted, private, NSQL).
+
+runtime:
+  task_history:
+    enabled: true
+    captured_output: truncated
+  # v2 requires auth on /v1/mcp and /v1/tools. We give the demo a single
+  # static key so clients (and `spice` CLI) can reach those endpoints.
+  auth:
+    api-key:
+      enabled: true
+      keys:
+        - openclaw-demo-key
+
+# ============================================================================
+# Datasets — what AcmeClaw can see when it asks Spice for data.
+#
+# Two patterns side-by-side:
+#   * Federated  — live, queried at request time, no copy.
+#   * Accelerated — refreshed on a schedule into a local engine for sub-second
+#     SQL and offline availability.
+# ============================================================================
+datasets:
+  # ---- Federated: live CRM, no copy ----------------------------------------
+  - from: postgres:public.accounts
+    name: crm_accounts
+    description: |
+      Live CRM accounts from the operational Postgres read-replica. Federated
+      so AcmeClaw always sees the current account state without ETL.
+    params:
+      pg_host: ${secrets:CRM_PG_HOST}
+      pg_port: ${secrets:CRM_PG_PORT}
+      pg_db: ${secrets:CRM_PG_DB}
+      pg_user: ${secrets:CRM_PG_USER}
+      pg_pass: ${secrets:CRM_PG_PASS}
+      pg_sslmode: ${secrets:CRM_PG_SSLMODE}
+
+  # ---- Federated: live support tickets -------------------------------------
+  # Using GitHub Issues as a stand-in for an internal ticket source.
+  - from: github:github.com/spiceai/spiceai/issues
+    name: support_tickets
+    description: |
+      Open tickets from the customer-facing issue tracker. Federated so
+      AcmeClaw can answer "what's blocking customer X right now?" without
+      a stale dump.
+    params:
+      github_token: ${secrets:GITHUB_TOKEN}
+
+  # ---- Accelerated: hot analytics, Arrow in-memory -------------------------
+  - from: s3://spiceai-demo-datasets/cleaned_sales_data.parquet
+    name: sales_daily
+    description: |
+      Daily sales rollups. Accelerated in-memory (Arrow) for sub-second
+      analytics on aggregations AcmeClaw runs on every dashboard load.
+    acceleration:
+      enabled: true
+      refresh_mode: full
+      refresh_check_interval: 1h
+
+  # ---- Accelerated: reference data, SQLite on disk -------------------------
+  - from: s3://spiceai-demo-datasets/taxi_trips/2024/
+    name: product_catalog
+    description: |
+      Reference product catalog. Accelerated to on-disk SQLite so AcmeClaw
+      can run lookups even when the upstream is unreachable.
+    params:
+      file_format: parquet
+    acceleration:
+      enabled: true
+      engine: sqlite
+      refresh_check_interval: 6h
+
+# ============================================================================
+# Tools — MCP servers exposed through Spice's `/v1/mcp` gateway.
+#
+# Both surface alongside Spice's built-in tools (`sql`, `list_datasets`,
+# `table_schema`, `search`, `memory`, ...) so any MCP client sees one unified
+# tool catalog.
+# ============================================================================
+tools:
+  # ---- Local MCP, supervised by Spice over stdio ---------------------------
+  - name: agent_memory
+    from: mcp:npx
+    description: |
+      Persistent knowledge graph for the agent (people, projects, prefs).
+      Started, supervised, and restarted by Spice over stdio.
+    params:
+      mcp_args: -y @modelcontextprotocol/server-memory
+
+  # ---- Remote MCP, proxied through Spice -----------------------------------
+  - name: claw_platform
+    from: mcp:http://127.0.0.1:8092/v1/mcp
+    description: |
+      Acme platform team's internal MCP — deploys, runbooks, on-call. Spice
+      proxies it so AcmeClaw sees a single tool surface and Spice's task
+      history captures every cross-team call.
+    # Local stack: docker compose runs a second Spice on :8092 hosting
+    # `deploys` and `runbooks` as the proxy target. Swap CLAW_PLATFORM_MCP_URL
+    # in .env for the customer's real internal MCP endpoint.
+
+# ============================================================================
+# Embeddings — used by the Tool Registry's vector channel
+# (`tool_embedding_model`). Required because both chat models run on
+# `tools: search_registry`.
+#
+# Not currently wired to any dataset columns — if you want semantic
+# `search` over `support_tickets`, that dataset needs to be accelerated
+# and have an `embeddings:` block on `body` / `title` (see the
+# `azure_openai` recipe in the Spice cookbook for the pattern).
+# ============================================================================
+embeddings:
+  - from: openai:text-embedding-3-small
+    name: text_embed
+    params:
+      openai_api_key: ${secrets:OPENAI_API_KEY}
+
+# ============================================================================
+# Models — model routing for clients that point at `/v1/chat/completions`.
+#
+# Three routes, picked by the client via the `model` field:
+#   * chat-router  — hosted OpenAI, general orchestrator.
+#   * chat-private — same shape, pointed at Acme's internal LLM endpoint;
+#                    use this for queries that touch sensitive CRM data.
+#   * nsql-coder   — small model with a tight SQL system prompt + worked
+#                    examples. Drives `/v1/nsql` and analytics tool calls.
+#
+# Every model has access to the same tool catalog, so swapping the model
+# never changes which data the agent can reach.
+# ============================================================================
+models:
+  - from: openai:gpt-5.4
+    name: chat-router
+    params:
+      openai_api_key: ${secrets:OPENAI_API_KEY}
+      tools: search_registry
+      tool_embedding_model: text_embed
+      system_prompt: |
+        You are AcmeClaw, Acme's internal copilot. Help employees answer
+        questions about CRM accounts, support tickets, sales analytics, and
+        cross-team platform operations.
+
+        You are wired to a Spice runtime that exposes a large, growing tool
+        catalog (built-in SQL/search tools, the `agent_memory/*` MCP, the
+        `claw_platform/*` MCP, and more). Instead of seeing every tool's
+        schema up front, you have two meta-tools:
+
+          1. `tool_search(query, keywords?, limit?)` — find the tools
+             relevant to the step you're about to take.
+          2. `tool_invoke(tool_id, arguments)` — call one of those tools.
+
+        Always start by calling `tool_search` with a short description of
+        what you need; then call `tool_invoke` with the highest-scoring
+        match. `list_datasets` is also available directly to orient yourself
+        on the data surface.
+
+        Routing hints for `tool_search`:
+          - Numerical / aggregation questions → search for "sql query" and
+            invoke `sql` against the datasets.
+          - Ticket questions (status, owner, recent activity) → search for
+            "sql query" and invoke `sql` against the `support_tickets`
+            table; the LIKE operator on `title` / `body` is fine for
+            keyword filtering.
+          - Cross-team operational questions (deploys, runbooks, on-call) →
+            search for "platform deploys runbook" — results come from the
+            `claw_platform/*` MCP.
+          - Persisting or recalling user context across sessions → search
+            for "agent memory knowledge graph" — results come from the
+            `agent_memory/*` MCP.
+          - When unsure of a column or value, search for "table schema" or
+            "sample distinct values" before writing SQL.
+
+  - from: openai:acme-llama-3.1-70b-instruct
+    name: chat-private
+    params:
+      endpoint: ${secrets:PRIVATE_LLM_ENDPOINT}
+      openai_api_key: ${secrets:PRIVATE_LLM_API_KEY}
+      tools: search_registry
+      tool_embedding_model: text_embed
+      system_prompt: |
+        You are AcmeClaw running on Acme's private LLM endpoint. Data
+        accessed through these tools must not leave Acme infrastructure.
+
+        You have access to the same Spice tool catalog as the hosted route,
+        surfaced through two meta-tools:
+
+          1. `tool_search(query, keywords?, limit?)` — discover tools.
+          2. `tool_invoke(tool_id, arguments)` — call them.
+
+        Start every step with `tool_search`. Use `list_datasets` directly
+        when you need to enumerate available tables.
+
+        Routing hints (identical to the hosted route):
+          - Numerical or ticket questions → search for "sql query" and
+            invoke `sql`. The `support_tickets` table supports LIKE on
+            `title` / `body` for keyword filtering.
+          - Cross-team ops → search for "platform deploys runbook".
+          - User context → search for "agent memory".
+
+  - from: openai:gpt-5.4-mini
+    name: nsql-coder
+    params:
+      openai_api_key: ${secrets:OPENAI_API_KEY}
+      tools: list_datasets, table_schema, sample_distinct_columns, sql
+      system_prompt: |
+        You convert natural-language questions into a single SQL query
+        against the Spice runtime. Return only the SQL — no commentary.
+
+        Available tables:
+          - crm_accounts(account_id, name, owner, plan, mrr, created_at,
+                         last_touch_at)
+          - support_tickets(id, title, body, state, assignee, created_at,
+                            closed_at, labels)
+          - sales_daily(order_date, sku, region, units, revenue)
+          - product_catalog(sku, name, category, list_price)
+
+        Worked examples:
+
+        Q: "Top 5 accounts by MRR on the Enterprise plan."
+        SQL:
+          SELECT name, mrr
+          FROM crm_accounts
+          WHERE plan = 'Enterprise'
+          ORDER BY mrr DESC
+          LIMIT 5;
+
+        Q: "Revenue trend for SKU 'WIDGET-A' in EMEA over the last 30 days."
+        SQL:
+          SELECT order_date, SUM(revenue) AS revenue
+          FROM sales_daily
+          WHERE sku = 'WIDGET-A'
+            AND region = 'EMEA'
+            AND order_date >= current_date - INTERVAL '30 days'
+          GROUP BY order_date
+          ORDER BY order_date;
+
+        Q: "How many open tickets does each assignee have?"
+        SQL:
+          SELECT assignee, COUNT(*) AS open_tickets
+          FROM support_tickets
+          WHERE state = 'open'
+          GROUP BY assignee
+          ORDER BY open_tickets DESC;
+
+        Rules:
+          - Use only the tables above.
+          - Never invent columns. If unsure, call `table_schema` first.
+          - Prefer ANSI SQL; DataFusion dialect is fine.

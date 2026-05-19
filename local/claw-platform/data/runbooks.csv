@@ -1,0 +1,9 @@
+runbook_id,service,title,oncall_team,url,last_reviewed_at
+rb_001,checkout-api,Restart checkout-api pods,payments,https://runbooks.internal.acme.example/checkout/restart,2026-04-22
+rb_002,checkout-api,Drain a bad checkout-api deploy,payments,https://runbooks.internal.acme.example/checkout/drain,2026-05-02
+rb_003,billing-worker,Recover billing-worker queue lag,payments,https://runbooks.internal.acme.example/billing/queue-lag,2026-05-10
+rb_004,billing-worker,Replay failed billing jobs,payments,https://runbooks.internal.acme.example/billing/replay,2026-03-19
+rb_005,search-indexer,Reindex search corpus,search,https://runbooks.internal.acme.example/search/reindex,2026-05-04
+rb_006,auth-gateway,Rotate auth-gateway signing keys,security,https://runbooks.internal.acme.example/auth/rotate-keys,2026-05-15
+rb_007,auth-gateway,Recover from auth-gateway 5xx spike,security,https://runbooks.internal.acme.example/auth/5xx,2026-04-30
+rb_008,reporting-etl,Resume reporting-etl after partial run,data-platform,https://runbooks.internal.acme.example/reporting/resume,2026-02-11

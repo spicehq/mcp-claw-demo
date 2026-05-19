@@ -1,0 +1,39 @@
+version: v1
+kind: Spicepod
+name: claw-platform-stub
+description: |
+  Stand-in for Acme's internal platform MCP. Runs in docker for the local
+  demo so the main Spice's `claw_platform` tool has a real Streamable HTTP
+  endpoint to proxy.
+
+runtime:
+  task_history:
+    enabled: true
+    captured_output: truncated
+  # v2 enables API-key auth on /v1/tools and /v1/mcp by default. Disable it
+  # for the local demo so the main Spice can call us without credentials.
+  auth:
+    api-key:
+      enabled: true
+      keys:
+        - claw-platform-demo-key
+  # Note: `runtime.mcp.allowed_hosts` was added after 2.0.0-rc.4. The default
+  # localhost-only DNS-rebinding check already passes because the main Spice
+  # reaches us at 127.0.0.1:8092.
+
+datasets:
+  - from: file:///app/data/deploys.csv
+    name: deploys
+    description: Recent service deploys across all environments.
+    params:
+      file_format: csv
+    acceleration:
+      enabled: true
+
+  - from: file:///app/data/runbooks.csv
+    name: runbooks
+    description: On-call runbooks for production services.
+    params:
+      file_format: csv
+    acceleration:
+      enabled: true
