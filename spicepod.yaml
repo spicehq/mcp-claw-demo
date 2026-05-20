@@ -102,9 +102,11 @@ tools:
       Acme platform team's internal MCP — deploys, runbooks, on-call. Spice
       proxies it so AcmeClaw sees a single tool surface and Spice's task
       history captures every cross-team call.
-    # Local stack: docker compose runs a second Spice on :8092 hosting
-    # `deploys` and `runbooks` as the proxy target. Swap CLAW_PLATFORM_MCP_URL
-    # in .env for the customer's real internal MCP endpoint.
+    params:
+      # The upstream `claw-platform` Spice has runtime.auth.api-key enabled.
+      # Spice's MCP client attaches this header to every Streamable HTTP
+      # request, so no auth-injection sidecar is needed.
+      mcp_headers: 'X-API-Key: ${secrets:CLAW_PLATFORM_MCP_API_KEY}'
 
 # ============================================================================
 # Embeddings — used by the Tool Registry's vector channel
