@@ -1,16 +1,14 @@
 # Local stack for openclaw-mcp-demo.
 #
-#   postgres              — backs the federated `crm_accounts` dataset.
-#   stub-llm              — OpenAI-compatible stub serving as Acme's "private"
-#                           LLM (always returns a canned reply).
-#   claw-platform         — second Spice instance acting as the proxied platform
-#                           MCP target. Exposes `deploys` and `runbooks`.
-#   claw-platform-proxy   — nginx that injects the X-API-Key header on the way
-#                           into claw-platform (Spice's MCP client can't set it
-#                           itself in v2.0.0-rc.4).
+#   postgres       — backs the federated `crm_accounts` dataset.
+#   stub-llm       — OpenAI-compatible stub serving as Acme's "private" LLM
+#                    (always returns a canned reply).
+#   claw-platform  — second Spice instance hosting `deploys` and `runbooks`
+#                    as the proxied MCP target. Main Spice authenticates to
+#                    it via `mcp_headers` on the `claw_platform` tool.
 #
-# Main Spice runs on the host (`spice run` in the project root). It reaches
-# the three services above through localhost-mapped ports (5432, 8081, 8092).
+# Main Spice runs on the host (`spice run` in the project root) and reaches
+# each of these on localhost-mapped ports (5432, 8081, 8092).
 
 services:
   postgres:
@@ -43,32 +41,16 @@ services:
       retries: 10
 
   claw-platform:
-    # Pinned to v2 RC because v1.x doesn't support `runtime.mcp` and uses the
-    # older `/v1/mcp/sse` endpoint shape. Bump this when v2 ships stable.
     image: spiceai/spiceai:2.0.0-rc.4
     container_name: openclaw-claw-platform
     command: ["--http", "0.0.0.0:8090", "--flight", "0.0.0.0:50051", "/app"]
     working_dir: /app
     volumes:
       - ./local/claw-platform:/app:ro
-    # No host port: the main Spice reaches us through claw-platform-proxy.
-    # No healthcheck either; the upstream image is distroless and has no
-    # shell or curl/wget for healthcheck commands.
-    expose:
-      - "8090"
-
-  claw-platform-proxy:
-    # v2 Spice requires X-API-Key on /v1/mcp, but the rmcp client in Spice
-    # 1.5 doesn't expose a way to set custom headers. This sidecar injects
-    # the key for us. See ./local/claw-platform-proxy/nginx.conf.
-    image: nginx:1.27-alpine
-    container_name: openclaw-claw-platform-proxy
-    depends_on:
-      - claw-platform
-    volumes:
-      - ./local/claw-platform-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "8092:8090"
+    # No healthcheck — the upstream image is distroless and has no shell
+    # or curl/wget for healthcheck commands.
 
 volumes:
   postgres-data:

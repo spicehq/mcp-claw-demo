@@ -198,15 +198,15 @@ cp .env.example .env
 docker compose up -d
 ```
 
-| Service               | Port     | What it is                                                                  |
-| --------------------- | -------- | --------------------------------------------------------------------------- |
-| `postgres`            | `:5432`  | Seeded with `public.accounts` (12 rows) for `crm_accounts`.                 |
-| `stub-llm`            | `:8081`  | OpenAI-compatible stub that serves `chat-private` with a canned response.   |
-| `claw-platform`       | internal | A second Spice instance hosting `deploys` + `runbooks` as the proxy target. |
-| `claw-platform-proxy` | `:8092`  | nginx that injects `X-API-Key` for the main Spice's MCP client.\*           |
+| Service          | Port    | What it is                                                                  |
+| ---------------- | ------- | --------------------------------------------------------------------------- |
+| `postgres`       | `:5432` | Seeded with `public.accounts` (12 rows) for `crm_accounts`.                 |
+| `stub-llm`       | `:8081` | OpenAI-compatible stub that serves `chat-private` with a canned response.   |
+| `claw-platform`  | `:8092` | Second Spice instance hosting `deploys` + `runbooks` as the proxy target.   |
 
-\* Temporary — Spice's MCP client will soon support the auth key directly
-on the tool, at which point this sidecar can be removed.
+The main Spice authenticates to `claw-platform`'s `/v1/mcp` by passing
+`mcp_headers: 'X-API-Key: ${secrets:CLAW_PLATFORM_MCP_API_KEY}'` on the
+`claw_platform` tool — no auth sidecar required.
 
 ### 4. Start Spice
 

@@ -1,16 +1,19 @@
-"""Stub OpenAI-compatible /v1/chat/completions server.
+"""Stub OpenAI-compatible LLM server.
 
-Stands in for Acme's "private" LLM endpoint in the local demo stack. It accepts
-any chat request and always returns the same canned response, so end-to-end
-flows through `model: chat-private` work without needing real inference.
+Stands in for Acme's "private" LLM endpoint in the local demo stack. It
+accepts any chat request and always returns the same canned reply, so
+end-to-end flows through `model: chat-private` work without needing real
+inference.
 
 Endpoints:
   GET  /healthz                  → 200 "ok"
   GET  /v1/models                → list one model so list_models hints succeed
-  POST /v1/chat/completions      → fixed completion (handles `stream: true` too)
+  POST /v1/chat/completions      → fixed Chat Completions response
+                                   (handles `stream: true` too)
+  POST /v1/responses             → fixed Responses API response
 
-The response shape matches the OpenAI Chat Completions API closely enough for
-Spice's async-openai client to parse it without complaint.
+Response shapes match what Spice's async-openai client expects closely
+enough that startup health checks pass for both endpoints.
 """
 from __future__ import annotations
 
@@ -53,6 +56,38 @@ def _completion_payload(model: str) -> dict[str, Any]:
             "total_tokens": 66,
         },
         "system_fingerprint": "stub",
+    }
+
+
+def _responses_payload(model: str) -> dict[str, Any]:
+    """Minimal OpenAI Responses API payload."""
+    resp_id = f"resp_{uuid.uuid4().hex[:24]}"
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    return {
+        "id": resp_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": model,
+        "output": [
+            {
+                "id": msg_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": CANNED_REPLY, "annotations": []}
+                ],
+            }
+        ],
+        "usage": {
+            "input_tokens": 42,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 24,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 66,
+        },
+        "error": None,
     }
 
 
@@ -115,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": {"message": "not found"}})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/v1/chat/completions":
+        if self.path not in ("/v1/chat/completions", "/v1/responses"):
             self._json(404, {"error": {"message": "not found"}})
             return
 
@@ -128,8 +163,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         model = req.get("model") or "acme-llama-3.1-70b-instruct"
-        stream = bool(req.get("stream"))
 
+        if self.path == "/v1/responses":
+            self._json(200, _responses_payload(model))
+            return
+
+        # /v1/chat/completions
+        stream = bool(req.get("stream"))
         if not stream:
             self._json(200, _completion_payload(model))
             return
