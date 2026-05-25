@@ -28,7 +28,62 @@ INSERT INTO public.accounts (account_id, name, owner, plan, mrr, created_at, las
 CREATE INDEX accounts_plan_idx  ON public.accounts (plan);
 CREATE INDEX accounts_owner_idx ON public.accounts (owner);
 
--- Read-only role for Spice. Matches the CRM_PG_USER/CRM_PG_PASS in .env.example.
+-- Audit log — backs the `audit_log` dataset in spicepod.yaml. Spice opens
+-- this as `access: read_write` and accelerates it into Arrow, so callers
+-- can INSERT rows through Spice's `/v1/sql` endpoint (with a `:rw` API
+-- key) and the writes land here.
+--
+-- Two design notes for the schema:
+--
+--  1) DataFusion's INSERT plan materializes every column in the target
+--     schema and sends explicit NULLs for columns the caller didn't list
+--     (Postgres DEFAULTs only fire when the column is absent from the
+--     INSERT, not when NULL is supplied explicitly). So every column the
+--     caller may omit must be nullable on the Postgres side, otherwise
+--     DataFusion's Arrow batch validator rejects the row before it ever
+--     reaches Postgres.
+--
+--  2) PRIMARY KEY implies NOT NULL, so we keep a surrogate `id` BIGINT
+--     column but DON'T mark it primary key. A BEFORE INSERT trigger
+--     fills NULL id/ts from a sequence/clock — the trigger fires before
+--     any NOT NULL constraint check, but more importantly DataFusion
+--     sees nullable Arrow columns and stops rejecting the batch.
+CREATE SEQUENCE IF NOT EXISTS public.audit_log_id_seq;
+
+CREATE TABLE IF NOT EXISTS public.audit_log (
+    id         BIGINT,
+    ts         TIMESTAMPTZ,
+    actor      TEXT         NOT NULL,
+    action     TEXT         NOT NULL,
+    target     TEXT         NOT NULL,
+    details    TEXT         NOT NULL DEFAULT ''
+);
+
+CREATE OR REPLACE FUNCTION public.audit_log_fill_defaults()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.id IS NULL THEN
+        NEW.id := nextval('public.audit_log_id_seq');
+    END IF;
+    IF NEW.ts IS NULL THEN
+        NEW.ts := now();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS audit_log_fill_defaults_trigger ON public.audit_log;
+CREATE TRIGGER audit_log_fill_defaults_trigger
+    BEFORE INSERT ON public.audit_log
+    FOR EACH ROW EXECUTE FUNCTION public.audit_log_fill_defaults();
+
+CREATE UNIQUE INDEX audit_log_id_idx     ON public.audit_log (id);
+CREATE INDEX        audit_log_action_idx ON public.audit_log (action);
+CREATE INDEX        audit_log_ts_idx     ON public.audit_log (ts DESC);
+
+-- Read/write role for Spice. Used by both the federated `crm_accounts`
+-- dataset (SELECT only) and the read_write `audit_log` dataset (SELECT +
+-- INSERT). Matches CRM_PG_USER/CRM_PG_PASS in .env.example.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'spice_ro') THEN
@@ -37,6 +92,8 @@ BEGIN
 END
 $$;
 
-GRANT CONNECT ON DATABASE crm        TO spice_ro;
-GRANT USAGE   ON SCHEMA   public     TO spice_ro;
-GRANT SELECT  ON public.accounts     TO spice_ro;
+GRANT CONNECT ON DATABASE crm                  TO spice_ro;
+GRANT USAGE   ON SCHEMA   public               TO spice_ro;
+GRANT SELECT  ON public.accounts               TO spice_ro;
+GRANT SELECT, INSERT ON public.audit_log       TO spice_ro;
+GRANT USAGE   ON SEQUENCE public.audit_log_id_seq TO spice_ro;

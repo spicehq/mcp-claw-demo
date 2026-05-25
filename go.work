@@ -1,0 +1,6 @@
+go 1.22
+
+use (
+	./local/expense-api
+	./local/expense-mcp
+)

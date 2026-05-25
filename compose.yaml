@@ -1,14 +1,18 @@
 # Local stack for openclaw-mcp-demo.
 #
-#   postgres       — backs the federated `crm_accounts` dataset.
+#   postgres       — backs the federated `crm_accounts` dataset AND the
+#                    read_write `audit_log` dataset (Arrow-accelerated).
 #   stub-llm       — OpenAI-compatible stub serving as Acme's "private" LLM
 #                    (always returns a canned reply).
 #   claw-platform  — second Spice instance hosting `deploys` and `runbooks`
 #                    as the proxied MCP target. Main Spice authenticates to
 #                    it via `mcp_headers` on the `claw_platform` tool.
+#   expense-api    — stand-in HTTP REST service for expense reports. The
+#                    `expense_reports` stdio MCP (Go, supervised by Spice)
+#                    wraps this so agents can list / file / approve.
 #
 # Main Spice runs on the host (`spice run` in the project root) and reaches
-# each of these on localhost-mapped ports (5432, 8081, 8092).
+# each of these on localhost-mapped ports (5432, 8081, 8092, 8093).
 
 services:
   postgres:
@@ -19,7 +23,9 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      # Host 5433 → container 5432 to avoid colliding with other local
+      # Postgres instances. .env.example sets CRM_PG_PORT=5433 to match.
+      - "5433:5432"
     volumes:
       - ./local/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - postgres-data:/var/lib/postgresql/data
@@ -51,6 +57,15 @@ services:
       - "8092:8090"
     # No healthcheck — the upstream image is distroless and has no shell
     # or curl/wget for healthcheck commands.
+
+  expense-api:
+    build: ./local/expense-api
+    container_name: openclaw-expense-api
+    ports:
+      - "8093:8093"
+    # Distroless runtime — no shell for healthcheck. The Go binary has a
+    # /healthz endpoint anyway; Spice's expense_reports MCP will surface
+    # any connectivity failure as a tool error.
 
 volumes:
   postgres-data:

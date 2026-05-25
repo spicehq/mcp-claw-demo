@@ -14,11 +14,18 @@ runtime:
     captured_output: truncated
   # v2 requires auth on /v1/mcp and /v1/tools. We give the demo a single
   # static key so clients (and `spice` CLI) can reach those endpoints.
+  #
+  # The `:rw` suffix tags the key as ReadWrite (vs. the default ReadOnly).
+  # This unlocks INSERT against `audit_log` via `/v1/sql` direct calls.
+  # The MCP `sql` tool path (`/v1/tools/sql`) currently still rejects
+  # writes regardless of API key role — tracked upstream as
+  # https://github.com/spiceai/spiceai/issues/11029 — so for now the
+  # write half of the demo flow has to use `/v1/sql`.
   auth:
     api-key:
       enabled: true
       keys:
-        - openclaw-demo-key
+        - openclaw-demo-key:rw
 
 # ============================================================================
 # Datasets — what AcmeClaw can see when it asks Spice for data.
@@ -42,6 +49,32 @@ datasets:
       pg_user: ${secrets:CRM_PG_USER}
       pg_pass: ${secrets:CRM_PG_PASS}
       pg_sslmode: ${secrets:CRM_PG_SSLMODE}
+
+  # ---- Read/write: Postgres source, Arrow accelerator ----------------------
+  # Demonstrates Spice as a write surface, not just a read surface. Agents
+  # call the `sql` tool with INSERT statements; Spice routes the writes to
+  # Postgres via the read_write connector, and the Arrow accelerator keeps
+  # subsequent reads fast.
+  - from: postgres:public.audit_log
+    name: audit_log
+    access: read_write
+    description: |
+      Append-only audit log of mutating actions taken by AcmeClaw on behalf
+      of users (filing/approving expense reports, etc.). Backed by Postgres
+      with `access: read_write` and accelerated into Arrow so reads stay
+      sub-millisecond while writes propagate to the underlying table.
+    params:
+      pg_host: ${secrets:CRM_PG_HOST}
+      pg_port: ${secrets:CRM_PG_PORT}
+      pg_db: ${secrets:CRM_PG_DB}
+      pg_user: ${secrets:CRM_PG_USER}
+      pg_pass: ${secrets:CRM_PG_PASS}
+      pg_sslmode: ${secrets:CRM_PG_SSLMODE}
+    acceleration:
+      enabled: true
+      engine: arrow
+      refresh_mode: full
+      refresh_check_interval: 30s
 
   # ---- Federated: live support tickets -------------------------------------
   # Using GitHub Issues as a stand-in for an internal ticket source.
@@ -107,6 +140,22 @@ tools:
       # Spice's MCP client attaches this header to every Streamable HTTP
       # request, so no auth-injection sidecar is needed.
       mcp_headers: 'X-API-Key: ${secrets:CLAW_PLATFORM_MCP_API_KEY}'
+
+  # ---- Local MCP, supervised over stdio (Go) -------------------------------
+  # Wraps the expense-api HTTP service (docker compose, :8093). Shows that
+  # Spice's MCP gateway can front *any* HTTP API — including writes —
+  # without each client speaking the upstream's wire protocol directly.
+  - name: expense_reports
+    from: mcp:go
+    description: |
+      Expense reports system: list, file, approve. Wraps an internal REST
+      service so AcmeClaw can act on it through the same tool surface as
+      everything else. Every mutating call should be paired with an
+      `audit_log` INSERT through the `sql` tool.
+    params:
+      mcp_args: run ./local/expense-mcp
+    env:
+      EXPENSE_API_URL: http://127.0.0.1:8093
 
 # ============================================================================
 # Embeddings — used by the Tool Registry's vector channel
@@ -176,11 +225,43 @@ models:
           - Cross-team operational questions (deploys, runbooks, on-call) →
             search for "platform deploys runbook" — results come from the
             `claw_platform/*` MCP.
+          - Expense reports (list, file, approve) → search for "expense
+            report" — results come from the `expense_reports/*` MCP.
           - Persisting or recalling user context across sessions → search
             for "agent memory knowledge graph" — results come from the
             `agent_memory/*` MCP.
           - When unsure of a column or value, search for "table schema" or
             "sample distinct values" before writing SQL.
+
+        AUDIT LOG SKILL — REQUIRED for every mutating action.
+
+        Whenever you call a tool that *changes state* — currently
+        `expense_reports/file_expense_report` and
+        `expense_reports/approve_expense_report` — you MUST follow it
+        immediately with an INSERT into the `audit_log` table via the
+        `sql` tool. This is non-negotiable: an action that isn't logged
+        didn't happen.
+
+        Schema:
+          audit_log(id BIGSERIAL, ts TIMESTAMPTZ default now(),
+                    actor TEXT, action TEXT, target TEXT, details TEXT)
+
+        - `actor`   — the user on whose behalf you acted (their email),
+                      or 'acmeclaw' if no user is identified.
+          - `action`  — short verb tag, e.g. 'expense.file', 'expense.approve'.
+          - `target`  — the affected entity id, e.g. 'exp_1003'.
+          - `details` — short free-text summary; include amount/currency
+                        for filings, approver email for approvals.
+
+        Example after a successful `file_expense_report` returning
+        id=exp_1042 for alice@acme.example, $250 USD travel:
+
+          INSERT INTO audit_log (actor, action, target, details)
+          VALUES ('alice@acme.example', 'expense.file', 'exp_1042',
+                  '250.00 USD travel — onsite review');
+
+        `id` and `ts` are auto-populated; do not include them. Always
+        log AFTER the mutation succeeds — never before.
 
   - from: openai:acme-llama-3.1-70b-instruct
     name: chat-private
@@ -208,7 +289,20 @@ models:
             invoke `sql`. The `support_tickets` table supports LIKE on
             `title` / `body` for keyword filtering.
           - Cross-team ops → search for "platform deploys runbook".
+          - Expense reports → search for "expense report".
           - User context → search for "agent memory".
+
+        AUDIT LOG SKILL — REQUIRED for every mutating action (filing or
+        approving an expense report, etc.). After each successful
+        `expense_reports/*` mutation, INSERT a row into `audit_log` via
+        the `sql` tool:
+
+          INSERT INTO audit_log (actor, action, target, details)
+          VALUES ('<user-email>', '<expense.file|expense.approve>',
+                  '<report-id>', '<short summary>');
+
+        `id` and `ts` are auto-populated. Log AFTER the mutation
+        succeeds — an action that isn't logged didn't happen.
 
   - from: openai:gpt-5.4-mini
     name: nsql-coder
@@ -226,6 +320,7 @@ models:
                             closed_at, labels)
           - sales_daily(order_date, sku, region, units, revenue)
           - product_catalog(sku, name, category, list_price)
+          - audit_log(id, ts, actor, action, target, details)
 
         Worked examples:
 

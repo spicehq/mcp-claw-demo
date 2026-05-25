@@ -4,8 +4,13 @@ A self-contained Spicepod that shows how Spice can serve as the **single pane
 of glass** behind a personal-agent platform like OpenClaw / NemoClaw:
 
 - **Federated + accelerated data** exposed as one SQL surface.
+- **Reads AND writes** through Spice — an `audit_log` Postgres table is
+  exposed as a `read_write` Arrow-accelerated dataset. The agent INSERTs
+  into it through the same `sql` tool it uses for reads.
 - **MCP gateway** — a local stdio MCP and a remote HTTP MCP are re-exposed,
-  alongside Spice's built-in tools, over `/v1/mcp`.
+  alongside Spice's built-in tools, over `/v1/mcp`. A second stdio MCP
+  (`expense_reports`, Go) wraps an internal REST service to show that the
+  gateway can front *any* HTTP API — including mutating endpoints.
 - **Model routing with the Tool Registry** — three routed models (hosted,
   private, NSQL) share the same internal tool catalog. The chat models see
   only `tool_search` and `tool_invoke` meta-tools per turn, keeping
@@ -36,13 +41,16 @@ unified catalog at `/v1/mcp`.
   │ Claude │  │                                                  │       │
   │  (any  │  │   agent_memory/*  ── stdio ──► npx @mcp/memory   │       │
   │  LLM)  │  │                                                  │       │
-  └────────┘  │   claw_platform/* ── HTTP  ──► remote MCP        │       │
+  └────────┘  │   claw_platform/*   ── HTTP  ──► remote MCP      │       │
+              │   expense_reports/* ── stdio ──► Go MCP ──► REST │       │
               │                                                  │       │
               │   datasets backing `sql`:                        │       │
-              │     crm_accounts    ── federated ──► Postgres    │       │
-              │     support_tickets ── federated ──► GitHub      │       │
+              │     crm_accounts    ── federated   ──► Postgres  │       │
+              │     support_tickets ── federated   ──► GitHub    │       │
               │     sales_daily     ── accelerated (Arrow)       │       │
               │     product_catalog ── accelerated (SQLite)      │       │
+              │     audit_log       ── read_write  ──► Postgres  │       │
+              │                          (Arrow accelerator)     │       │
               └──────────────────────────────────────────────────────────┘
 ```
 
@@ -84,12 +92,14 @@ internally against the same catalog Pattern A exposes.
               │       │      keyword + schema + vector via text_embed)   │
               │       ▼                                                  │
               │     resolves to one of:                                  │
-              │       sql, search, list_datasets, table_schema, ...      │
-              │       agent_memory/*  (stdio)                            │
-              │       claw_platform/* (HTTP)                             │
+              │       sql (READ + INSERT), search, list_datasets, ...    │
+              │       agent_memory/*    (stdio)                          │
+              │       claw_platform/*   (HTTP)                           │
+              │       expense_reports/* (stdio, Go → REST :8093)         │
               │                  │                                       │
               │                  ▼                                       │
               │       Postgres │ GitHub │ S3 (Arrow) │ S3 (SQLite)       │
+              │       Postgres (read_write, Arrow accel) ── audit_log    │
               └──────────────────────────────────────────────────────────┘
 ```
 
@@ -110,19 +120,21 @@ What this gives you:
 
 ### Datasets
 
-| Name              | Source                            | Mode        | Why                                              |
-| ----------------- | --------------------------------- | ----------- | ------------------------------------------------ |
-| `crm_accounts`    | Postgres `public.accounts`        | Federated   | CRM truth must be live, no ETL.                  |
-| `support_tickets` | GitHub Issues (stand-in)          | Federated   | Tickets churn constantly.                        |
-| `sales_daily`     | S3 parquet (`cleaned_sales_data`) | Accelerated | Hot analytics — Arrow in-memory, refresh hourly. |
-| `product_catalog` | S3 parquet (taxi_trips stand-in)  | Accelerated | Reference data — SQLite on disk, refresh 6h.     |
+| Name              | Source                            | Mode                       | Why                                                            |
+| ----------------- | --------------------------------- | -------------------------- | -------------------------------------------------------------- |
+| `crm_accounts`    | Postgres `public.accounts`        | Federated                  | CRM truth must be live, no ETL.                                |
+| `support_tickets` | GitHub Issues (stand-in)          | Federated                  | Tickets churn constantly.                                      |
+| `sales_daily`     | S3 parquet (`cleaned_sales_data`) | Accelerated                | Hot analytics — Arrow in-memory, refresh hourly.               |
+| `product_catalog` | S3 parquet (taxi_trips stand-in)  | Accelerated                | Reference data — SQLite on disk, refresh 6h.                   |
+| `audit_log`       | Postgres `public.audit_log`       | Read/write + Arrow accel.  | Every mutating agent action lands here. `INSERT` via the `sql` tool — Spice writes through to Postgres. |
 
 ### Tools
 
-| Name            | `from:`                                              | Transport       | What it adds                                     |
-| --------------- | ---------------------------------------------------- | --------------- | ------------------------------------------------ |
-| `agent_memory`  | `mcp:npx` (`@modelcontextprotocol/server-memory`)    | stdio, local    | Persistent knowledge graph for the agent.        |
-| `claw_platform` | `mcp:http://...`                                     | Streamable HTTP | Proxy to an internal platform MCP.               |
+| Name              | `from:`                                              | Transport       | What it adds                                                    |
+| ----------------- | ---------------------------------------------------- | --------------- | --------------------------------------------------------------- |
+| `agent_memory`    | `mcp:npx` (`@modelcontextprotocol/server-memory`)    | stdio, local    | Persistent knowledge graph for the agent.                       |
+| `claw_platform`   | `mcp:http://...`                                     | Streamable HTTP | Proxy to an internal platform MCP.                              |
+| `expense_reports` | `mcp:go` (`./local/expense-mcp`, stdlib only)        | stdio, local    | 3 tools — `list/file/approve_expense_report` — wrapping a local HTTP service. |
 
 Built-in tools (always on): `sql`, `list_datasets`, `table_schema`,
 `sample_distinct_columns`, `search`, `top_n_sample`, `random_sample`,
@@ -152,8 +164,9 @@ instance that backs `claw_platform`). The main Spice runs on your host.
 
 ### Prerequisites
 
-- macOS or Linux, with `docker`, `jq`, `curl`, and `node` (for the
-  `agent_memory` MCP via `npx`).
+- macOS or Linux, with `docker`, `jq`, `curl`, `node` (for the
+  `agent_memory` MCP via `npx`), and `go` 1.22+ (for the local
+  `expense_reports` stdio MCP — Spice runs it via `go run`, stdlib only).
 - An **OpenAI API key** — used by `chat-router`, `nsql-coder`, and
   `text_embed`.
 - A **GitHub PAT** with `repo` scope for the `support_tickets` dataset, and
@@ -198,11 +211,12 @@ cp .env.example .env
 docker compose up -d
 ```
 
-| Service          | Port    | What it is                                                                  |
-| ---------------- | ------- | --------------------------------------------------------------------------- |
-| `postgres`       | `:5432` | Seeded with `public.accounts` (12 rows) for `crm_accounts`.                 |
-| `stub-llm`       | `:8081` | OpenAI-compatible stub that serves `chat-private` with a canned response.   |
-| `claw-platform`  | `:8092` | Second Spice instance hosting `deploys` + `runbooks` as the proxy target.   |
+| Service          | Port    | What it is                                                                                                |
+| ---------------- | ------- | --------------------------------------------------------------------------------------------------------- |
+| `postgres`       | `:5432` | Seeded with `public.accounts` (12 rows) for `crm_accounts`, plus an empty `public.audit_log` table.       |
+| `stub-llm`       | `:8081` | OpenAI-compatible stub that serves `chat-private` with a canned response.                                 |
+| `claw-platform`  | `:8092` | Second Spice instance hosting `deploys` + `runbooks` as the proxy target.                                 |
+| `expense-api`    | `:8093` | Go REST service for expense reports (in-memory). Wrapped by the `expense_reports` stdio MCP for agents.   |
 
 The main Spice authenticates to `claw-platform`'s `/v1/mcp` by passing
 `mcp_headers: 'X-API-Key: ${secrets:CLAW_PLATFORM_MCP_API_KEY}'` on the
@@ -293,6 +307,120 @@ curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
   -d '{"model":"nsql-coder","query":"top 3 accounts by mrr"}'
 # → [{"name":"Stark Industries","mrr":64000.00}, ...]
 ```
+
+---
+
+## Writes through Spice — expense reports + audit log
+
+The `audit_log` dataset is the demo's write surface. It's a Postgres
+table exposed with `access: read_write` and accelerated into Arrow, so:
+
+- Reads (`SELECT * FROM audit_log`) hit the in-memory Arrow accelerator.
+- Writes (`INSERT INTO audit_log ...`) go through Spice's `sql` tool,
+  which routes the mutation to the underlying Postgres table. The Arrow
+  accelerator refreshes on its 30s interval (or on the next read after
+  a refresh).
+
+Paired with the `expense_reports/*` MCP, this lets you demonstrate a
+**mutation + audit** flow end-to-end through Spice — same gateway, same
+auth, same trace.
+
+> **Known issue (v2.0.0-rc.5):** the MCP `sql` tool runs through a
+> strict read-only validator and rejects INSERT even when the caller's
+> API key is tagged `:rw` and the dataset is `access: read_write`.
+> Direct `/v1/sql` calls with the same `:rw` key work today; the MCP
+> `sql` tool path is blocked. Tracked upstream as
+> [spiceai/spiceai#11029](https://github.com/spiceai/spiceai/issues/11029).
+> Once that's fixed, the `INSERT` examples below — which use the MCP
+> `sql` tool by design — will execute end-to-end. In the meantime,
+> swap `/v1/tools/sql` → `/v1/sql` and `query` → `sql` on the INSERT
+> calls to exercise the write path; the response shape changes to
+> `[{"count":1}]`, otherwise the flow is identical.
+
+### Direct (Pattern A — verifies the plumbing)
+
+```bash
+K=openclaw-demo-key
+
+# Tools list now includes expense_reports/*.
+curl -s -H "X-API-Key: $K" http://127.0.0.1:8090/v1/tools \
+  | jq -r '.[].name' | grep expense_reports
+
+# 1) File a new expense report through the MCP gateway.
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/tools/expense_reports/file_expense_report \
+  -d '{"submitter":"alice@acme.example","amount":412.55,"currency":"USD","category":"travel","description":"Onsite review"}'
+# → [{"type":"text","text":"{\"id\":\"exp_1003\", ... ,\"status\":\"filed\", ...}"}]
+
+# 2) Log the file via the read_write audit_log dataset.
+#    NOTE: uses /v1/sql (not /v1/tools/sql) — see the "Known issue"
+#    callout above. The MCP `sql` tool will accept INSERT once
+#    spiceai/spiceai#11029 lands.
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/sql \
+  -d "{\"sql\":\"INSERT INTO audit_log (actor, action, target, details) VALUES ('alice@acme.example','expense.file','exp_1003','412.55 USD travel — Onsite review')\",\"parameters\":[]}"
+# → [{"count":1}]
+
+# 3) List reports through the MCP gateway.
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/tools/expense_reports/list_expense_reports -d '{}'
+
+# 4) Approve it through the MCP gateway.
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/tools/expense_reports/approve_expense_report \
+  -d '{"id":"exp_1003","approver":"manager@acme.example"}'
+
+# 5) Audit the approval too (again via /v1/sql for now).
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/sql \
+  -d "{\"sql\":\"INSERT INTO audit_log (actor, action, target, details) VALUES ('manager@acme.example','expense.approve','exp_1003','approved by manager@acme.example')\",\"parameters\":[]}"
+
+# 6) Read the audit log back through the MCP gateway. Reads work — the
+#    read-only restriction only affects writes. Served by the Arrow
+#    accelerator after its 30s refresh tick.
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/tools/sql \
+  -d '{"query":"SELECT ts, actor, action, target, details FROM audit_log ORDER BY ts DESC LIMIT 10"}'
+```
+
+### Through the chat model (Pattern B — the actual scenario)
+
+The `chat-router` and `chat-private` system prompts include an **audit-log
+skill** that requires the model to follow every mutating
+`expense_reports/*` call with an `INSERT INTO audit_log ...` via the
+`sql` tool.
+
+> **Heads up:** until [spiceai/spiceai#11029](https://github.com/spiceai/spiceai/issues/11029)
+> ships, the model's audit INSERTs will fail with a read-only error
+> even though the API key is `:rw`. The expense `file_expense_report`
+> / `approve_expense_report` calls still succeed; only the audit step
+> is blocked. Once the fix lands, the prompt below runs end-to-end with
+> no demo changes.
+
+Drive the full flow with one prompt:
+
+```bash
+K=openclaw-demo-key
+
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/chat/completions \
+  -d '{
+    "model":"chat-router",
+    "messages":[{"role":"user","content":"Please file a $250 USD travel expense for alice@acme.example (description: client visit), list reports to confirm, then approve the new report on behalf of manager@acme.example."}]
+  }' \
+  | jq -r '.choices[0].message.content'
+```
+
+Then verify the agent logged both mutations:
+
+```bash
+curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
+  http://127.0.0.1:8090/v1/sql \
+  -d '{"sql":"SELECT ts, actor, action, target, details FROM audit_log ORDER BY ts DESC LIMIT 10","parameters":[]}'
+```
+
+You should see two rows: one `expense.file`, one `expense.approve`, both
+targeting the report id the agent just created.
 
 ---
 
