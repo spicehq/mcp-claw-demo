@@ -325,3 +325,44 @@ WHERE trace_id = (
 )
 ORDER BY start_time;
 ```
+
+## 12. Agent mutations — did the audit log keep up?
+
+Counts mutating tool calls (`expense_reports/file_expense_report`,
+`expense_reports/approve_expense_report`) and compares them to rows in
+`audit_log`. If `mutations > audit_rows`, the agent skipped an audit
+INSERT — the system prompt's audit-log skill is supposed to prevent that.
+
+```sql
+WITH mutations AS (
+    SELECT COUNT(*) AS n
+    FROM runtime.task_history
+    WHERE task = 'tool_use::tool_invoke'
+      AND (labels['tool'] = 'expense_reports/file_expense_report'
+        OR labels['tool'] = 'expense_reports/approve_expense_report')
+      AND error_message IS NULL
+      AND start_time >= NOW() - INTERVAL '1 HOUR'
+),
+audit AS (
+    SELECT COUNT(*) AS n
+    FROM audit_log
+    WHERE ts >= NOW() - INTERVAL '1 HOUR'
+      AND action IN ('expense.file', 'expense.approve')
+)
+SELECT mutations.n AS mutations, audit.n AS audit_rows,
+       (mutations.n - audit.n) AS missing_audits
+FROM mutations, audit;
+```
+
+## 13. Audit log — last 10 mutations the agent performed
+
+The `audit_log` dataset itself, surfaced through the same `/v1/sql`
+endpoint. The Arrow accelerator serves this read in sub-millisecond;
+Postgres holds the durable copy.
+
+```sql
+SELECT ts, actor, action, target, details
+FROM audit_log
+ORDER BY ts DESC
+LIMIT 10;
+```
