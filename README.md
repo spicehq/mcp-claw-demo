@@ -325,17 +325,9 @@ Paired with the `expense_reports/*` MCP, this lets you demonstrate a
 **mutation + audit** flow end-to-end through Spice — same gateway, same
 auth, same trace.
 
-> **Known issue (v2.0.0-rc.5):** the MCP `sql` tool runs through a
-> strict read-only validator and rejects INSERT even when the caller's
-> API key is tagged `:rw` and the dataset is `access: read_write`.
-> Direct `/v1/sql` calls with the same `:rw` key work today; the MCP
-> `sql` tool path is blocked. Tracked upstream as
-> [spiceai/spiceai#11029](https://github.com/spiceai/spiceai/issues/11029).
-> Once that's fixed, the `INSERT` examples below — which use the MCP
-> `sql` tool by design — will execute end-to-end. In the meantime,
-> swap `/v1/tools/sql` → `/v1/sql` and `query` → `sql` on the INSERT
-> calls to exercise the write path; the response shape changes to
-> `[{"count":1}]`, otherwise the flow is identical.
+> Requires a runtime that includes [spiceai/spiceai#11040](https://github.com/spiceai/spiceai/pull/11040)
+> (merged 2026-05-27). Earlier builds reject INSERT through the MCP
+> `sql` tool regardless of API key role.
 
 ### Direct (Pattern A — verifies the plumbing)
 
@@ -352,14 +344,13 @@ curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
   -d '{"submitter":"alice@acme.example","amount":412.55,"currency":"USD","category":"travel","description":"Onsite review"}'
 # → [{"type":"text","text":"{\"id\":\"exp_1003\", ... ,\"status\":\"filed\", ...}"}]
 
-# 2) Log the file via the read_write audit_log dataset.
-#    NOTE: uses /v1/sql (not /v1/tools/sql) — see the "Known issue"
-#    callout above. The MCP `sql` tool will accept INSERT once
-#    spiceai/spiceai#11029 lands.
+# 2) Log the file via the read_write audit_log dataset, through the
+#    same MCP `sql` tool the agent uses for reads. The `:rw` API key
+#    flips the tool's read-only posture (see #11040).
 curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
-  http://127.0.0.1:8090/v1/sql \
-  -d "{\"sql\":\"INSERT INTO audit_log (actor, action, target, details) VALUES ('alice@acme.example','expense.file','exp_1003','412.55 USD travel — Onsite review')\",\"parameters\":[]}"
-# → [{"count":1}]
+  http://127.0.0.1:8090/v1/tools/sql \
+  -d "{\"query\":\"INSERT INTO audit_log (actor, action, target, details) VALUES ('alice@acme.example','expense.file','exp_1003','412.55 USD travel — Onsite review')\"}"
+# → "[{\"count\":1}]"
 
 # 3) List reports through the MCP gateway.
 curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
@@ -370,14 +361,13 @@ curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
   http://127.0.0.1:8090/v1/tools/expense_reports/approve_expense_report \
   -d '{"id":"exp_1003","approver":"manager@acme.example"}'
 
-# 5) Audit the approval too (again via /v1/sql for now).
+# 5) Audit the approval too — same MCP `sql` tool.
 curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
-  http://127.0.0.1:8090/v1/sql \
-  -d "{\"sql\":\"INSERT INTO audit_log (actor, action, target, details) VALUES ('manager@acme.example','expense.approve','exp_1003','approved by manager@acme.example')\",\"parameters\":[]}"
+  http://127.0.0.1:8090/v1/tools/sql \
+  -d "{\"query\":\"INSERT INTO audit_log (actor, action, target, details) VALUES ('manager@acme.example','expense.approve','exp_1003','approved by manager@acme.example')\"}"
 
-# 6) Read the audit log back through the MCP gateway. Reads work — the
-#    read-only restriction only affects writes. Served by the Arrow
-#    accelerator after its 30s refresh tick.
+# 6) Read the audit log back through the MCP gateway. Served by the
+#    Arrow accelerator after its 30s refresh tick.
 curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
   http://127.0.0.1:8090/v1/tools/sql \
   -d '{"query":"SELECT ts, actor, action, target, details FROM audit_log ORDER BY ts DESC LIMIT 10"}'
@@ -388,16 +378,7 @@ curl -s -X POST -H "X-API-Key: $K" -H "Content-Type: application/json" \
 The `chat-router` and `chat-private` system prompts include an **audit-log
 skill** that requires the model to follow every mutating
 `expense_reports/*` call with an `INSERT INTO audit_log ...` via the
-`sql` tool.
-
-> **Heads up:** until [spiceai/spiceai#11029](https://github.com/spiceai/spiceai/issues/11029)
-> ships, the model's audit INSERTs will fail with a read-only error
-> even though the API key is `:rw`. The expense `file_expense_report`
-> / `approve_expense_report` calls still succeed; only the audit step
-> is blocked. Once the fix lands, the prompt below runs end-to-end with
-> no demo changes.
-
-Drive the full flow with one prompt:
+`sql` tool. Drive the full flow with one prompt:
 
 ```bash
 K=openclaw-demo-key
