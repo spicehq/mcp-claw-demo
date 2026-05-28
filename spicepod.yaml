@@ -16,11 +16,9 @@ runtime:
   # static key so clients (and `spice` CLI) can reach those endpoints.
   #
   # The `:rw` suffix tags the key as ReadWrite (vs. the default ReadOnly).
-  # This unlocks INSERT against `audit_log` via `/v1/sql` direct calls.
-  # The MCP `sql` tool path (`/v1/tools/sql`) currently still rejects
-  # writes regardless of API key role — tracked upstream as
-  # https://github.com/spiceai/spiceai/issues/11029 — so for now the
-  # write half of the demo flow has to use `/v1/sql`.
+  # Both `/v1/sql` and the MCP `sql` tool (`/v1/tools/sql`) honor the
+  # role, so a ReadWrite caller can INSERT into `audit_log` through the
+  # same tool path the agent uses for reads.
   auth:
     api-key:
       enabled: true
