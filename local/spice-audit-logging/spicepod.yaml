@@ -1,0 +1,22 @@
+version: v1
+kind: Spicepod
+name: acmeclaw-mcp-demo
+
+runtime:
+  task_history:
+    enabled: true
+    captured_output: truncated
+    retention_period: 24h
+    retention_check_interval: 1h
+
+  auth:
+    api-key:
+      enabled: true
+      keys:
+        - foobar
+
+tools:
+  - name: server
+    from: mcp:uvx
+    params:
+      mcp_args: fastmcp run server.py

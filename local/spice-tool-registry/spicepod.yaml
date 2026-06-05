@@ -1,0 +1,29 @@
+version: v1
+kind: Spicepod
+name: acmeclaw-mcp-demo
+
+runtime:
+  task_history:
+    enabled: true
+    captured_output: truncated
+
+  auth:
+    api-key:
+      enabled: true
+      keys:
+        - foobar
+
+# ============================================================================
+# Tools — MCP server registered twice as mcp_server_a and mcp_server_b,
+# to show how spice handles tool prefix naming
+# ============================================================================
+tools:
+  - name: mcp_server_a
+    from: mcp:uvx
+    params:
+      mcp_args: fastmcp run server.py
+
+  - name: mcp_server_b
+    from: mcp:uvx
+    params:
+      mcp_args: fastmcp run server.py

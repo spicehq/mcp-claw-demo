@@ -1,0 +1,152 @@
+version: v1
+kind: Spicepod
+name: acmeclaw-mcp-demo
+
+runtime:
+  task_history:
+    enabled: true
+    captured_output: truncated
+  # ==========================================================================
+  # AUTHENTICATION + RBAC
+  # ==========================================================================
+  # v2 requires auth on /v1/mcp and /v1/tools. We keep the demo keys and add
+  # two RBAC-mapped keys so Cedar authorization policies below can enforce
+  # role-based access control.
+  #
+  # API key format: permission level is the YAML key; 'roles' attaches the
+  # key to Spice::Role::"..." entities consumed by Cedar policies.
+  # ==========================================================================
+  auth:
+    api-key:
+      enabled: true
+      keys:
+        # Admin — full ReadWrite, matched by Spice::Role::"admin"
+        - ReadWrite:
+            key: admin-api-key
+            roles:
+              - admin
+
+        # Analyst — read-only, matched by Spice::Role::"analyst"
+        - ReadOnly:
+            key: analyst-api-key
+            roles:
+              - analyst
+
+  # ==========================================================================
+  # AUTHORIZATION  (Cedar-based RBAC — Spice.ai Enterprise only)
+  # ==========================================================================
+  # Policy evaluation is (principal, action, resource, context).  Setting
+  # default: deny means anything not explicitly permitted is rejected.
+  #
+  # Two roles are demonstrated:
+  #   1. admin    — full access to every dataset, model, tool, and endpoint.
+  #   2. analyst  — read-only on sales_daily + product_catalog, built-in
+  #                 discovery/SQL tools, and read-only MCP tools on
+  #                 private_mcp_server; denied all mutating MCP tools.
+  # ==========================================================================
+  authorization:
+    enabled: true
+    default: deny
+    provider: local
+    policies:
+      # ---- Admin: blanket permit -------------------------------------------
+      - name: admins-everything
+        cedar: |
+          permit(
+            principal in Spice::Role::"admin",
+            action,
+            resource
+          );
+
+      # ---- Analyst: read-only on public datasets -----------------------------
+      - name: analyst-sales
+        cedar: |
+          permit(
+            principal in Spice::Role::"analyst",
+            action == Spice::Action::"query",
+            resource == Spice::Dataset::"sales_daily"
+          );
+
+      - name: analyst-catalog
+        cedar: |
+          permit(
+            principal in Spice::Role::"analyst",
+            action == Spice::Action::"query",
+            resource == Spice::Dataset::"product_catalog"
+          );
+
+      # ---- Analyst: safe discovery / SQL tools -------------------------------
+      - name: analyst-tools
+        cedar: |
+          permit(
+            principal in Spice::Role::"analyst",
+            action == Spice::Action::"execute",
+            resource == Spice::Tool::"sql"
+          );
+
+          permit(
+            principal in Spice::Role::"analyst",
+            action == Spice::Action::"execute",
+            resource == Spice::Tool::"list_datasets"
+          );
+
+          permit(
+            principal in Spice::Role::"analyst",
+            action == Spice::Action::"execute",
+            resource == Spice::Tool::"table_schema"
+          );
+
+          permit(
+            principal in Spice::Role::"analyst",
+            action == Spice::Action::"execute",
+            resource == Spice::Tool::"sample_distinct_columns"
+          );
+
+      # ---- Analyst: read-only MCP tools on private_mcp_server ----------------
+      - name: analyst-mcp-read
+        cedar: |
+          permit(
+            principal in Spice::Role::"analyst",
+            action == Spice::Action::"execute",
+            resource == Spice::Tool::"private_mcp_server/get_sales_summary"
+          );
+
+          permit(
+            principal in Spice::Role::"analyst",
+            action == Spice::Action::"execute",
+            resource == Spice::Tool::"private_mcp_server/lookup_product"
+          );
+
+datasets:
+  # ---- Accelerated: hot analytics, Arrow in-memory -------------------------
+  - from: s3://spiceai-demo-datasets/cleaned_sales_data.parquet
+    name: sales_daily
+    description: |
+      Daily sales rollups. Accelerated in-memory (Arrow) for sub-second
+      analytics on aggregations AcmeClaw runs on every dashboard load.
+
+  # ---- Accelerated: reference data, SQLite on disk -------------------------
+  - from: s3://spiceai-demo-datasets/taxi_trips/2024/
+    name: product_catalog
+    description: |
+      Reference product catalog. Accelerated to on-disk SQLite so AcmeClaw
+      can run lookups even when the upstream is unreachable.
+    params:
+      file_format: parquet
+
+# ============================================================================
+# Tools — MCP servers exposed through Spice's `/v1/mcp` gateway.
+#
+# Both surface alongside Spice's built-in tools (`sql`, `list_datasets`,
+# `table_schema`, `search`, `memory`, ...) so any MCP client sees one unified
+# tool catalog.
+# ============================================================================
+tools:
+  - name: private_mcp_server
+    from: mcp:uvx
+    description: |
+      Demo MCP with role-scoped tools. Analysts may call read tools
+      (get_sales_summary, lookup_product); admins may also call write tools
+      (update_sales_forecast, create_product_entry, delete_product_entry).
+    params:
+      mcp_args: fastmcp run server.py
